@@ -4,11 +4,13 @@
 #include <Adafruit_GFX.h>
 #include <qrcodex.h>
 #include <ESP32Servo.h>
-
-// Wi-Fi credentials
-const char* ssid = "rr";
-const char* password = "asdfghjkl";
-
+#include <ArduinoJson.h>
+#include <HTTPClient.h>
+const char* API_URL = "http://192.168.20.233:5000/machine";
+const char* API_KEY = "123";
+const char* ssid = "One";
+const char* password = "a38aggu4";
+const char* machineId = "1750080734343";
 // Servo objects
 Servo flap;
 Servo bucket;
@@ -91,7 +93,6 @@ void loop() {
       }
     }
   } else if (!loggedIn) {
-    displayMessage("Waiting for Login...");
     if (checkSession()) {
       loggedIn = true;
       displayMessage("User Logged In\nPut Waste\nPress Button");
@@ -133,133 +134,153 @@ void displayMessage(String message) {
 
 // Mock API: Initiate Session
 bool initiateSession() {
-  // Mock response
-  sessionCode = "MOCK123";
-  qrURL = "https://ur.com/a/" + sessionCode;
-
-  Serial.println("Session code: " + sessionCode);
-  displayQRCode(qrURL.c_str());
-
-  delay(1000); // Simulate network delay
-  return true; // Always succeed
-}
-
-// QR Code Display
-void displayQRCode(const char* text) {
-  // Create a QR code object
-  QRCode qrcode;
-  
-  // Define the size of the QR code (1-40, higher means bigger size)
-  uint8_t qrcodeData[qrcode_getBufferSize(3)];
-  qrcode_initText(&qrcode, qrcodeData, 3, 0, text);
-
-  // Clear the display
-  display.clearDisplay();
-
-  // Calculate the scale factor
-  int scale = min(SCREEN_WIDTH / qrcode.size, SCREEN_HEIGHT / qrcode.size);
-  
-  // Calculate horizontal shift
-  int shiftX = (SCREEN_WIDTH - qrcode.size*scale)/2;
-  
-  // Calculate horizontal shift
-  int shiftY = (SCREEN_HEIGHT - qrcode.size*scale)/2;
-
-  // Draw the QR code on the display
-  for (uint8_t y = 0; y < qrcode.size; y++) {
-    for (uint8_t x = 0; x < qrcode.size; x++) {
-      if (qrcode_getModule(&qrcode, x, y)) {
-        display.fillRect(shiftX+x * scale, shiftY + y*scale, scale, scale, WHITE);
-      }
-    }
-  }
-
-  // Update the display
-  display.display();
-}
-
-// Mock API: Polling Login
-bool checkSession() {
-  static int attempts = 0;
-  attempts++;
-
-  if (attempts >= 3) { // Simulate user logging in after 3 polls
-    Serial.println("User logged in (mock)");
+  HTTPClient http;
+  String url = String(API_URL) + "/initiate?id=" + machineId;
+  http.begin(url);
+  http.addHeader("x-api-key", API_KEY);
+  int httpCode = http.GET();
+  if (httpCode == 200) {
+    String payload = http.getString();
+    DynamicJsonDocument doc(1024);
+    deserializeJson(doc, payload);
+    sessionCode = doc["sessionCode"].as<String>();
+    qrURL = "http://192.168.20.230:3000/machine/" + sessionCode;
+    displayQRCode(qrURL.c_str());
+    http.end();
     return true;
   }
-
-  Serial.println("User not logged in yet (mock)");
-  delay(500); // Simulate polling delay
+  http.end();
   return false;
 }
 
-
-// Mock API: Process Waste
-bool processWaste() {
-  // Mock waste type and coins
-  String wasteTypes[] = {"plastic", "glass", "metal", "paper"};
-  String selectedWaste = wasteTypes[random(0, 4)]; // Randomly pick a type
-  int coins = random(1, 5); // Random coin count
-
-  Serial.println("Waste Type: " + selectedWaste + " | Coins: " + String(coins));
-  displayMessage("Sorting: " + selectedWaste + "\nCoins: " + String(coins));
-  sortWaste(selectedWaste.c_str());
-
-  delay(1000); // Simulate processing time
-  return true;
+void displayQRCode(const char* text) {
+  QRCode qrcode;
+  uint8_t qrcodeData[qrcode_getBufferSize(3)];
+  qrcode_initText(&qrcode, qrcodeData, 3, 0, text);
+  display.clearDisplay();
+  int scale = min(SCREEN_WIDTH / qrcode.size, SCREEN_HEIGHT / qrcode.size);
+  int shiftX = (SCREEN_WIDTH - qrcode.size * scale) / 2;
+  int shiftY = (SCREEN_HEIGHT - qrcode.size * scale) / 2;
+  for (uint8_t y = 0; y < qrcode.size; y++) {
+    for (uint8_t x = 0; x < qrcode.size; x++) {
+      if (qrcode_getModule(&qrcode, x, y)) {
+        display.fillRect(shiftX + x * scale, shiftY + y * scale, scale, scale, WHITE);
+      }
+    }
+  }
+  display.display();
 }
 
+bool checkSession() {
+  HTTPClient http;
+  String url = String(API_URL) + "/check?id=" + machineId;
+  http.begin(url);
+  http.addHeader("x-api-key", API_KEY);
+  int httpCode = http.GET();
+  if (httpCode == 200) {
+    String payload = http.getString();
+    DynamicJsonDocument doc(512);
+    deserializeJson(doc, payload);
+    bool isLoggedIn = doc["loggedIn"];
+    http.end();
+    return isLoggedIn;
+  }
+  http.end();
+  return false;
+}
 
-// Waste Sorting using 2 Servos
-void sortWaste(const char* text) {
+bool processWaste() {
+  HTTPClient http;
+  String url = String(API_URL) + "/start";
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("x-api-key", API_KEY);
+
+  DynamicJsonDocument requestBody(512);
+  requestBody["id"] = machineId;
+  requestBody["sessionCode"] = sessionCode;
+  String requestBodyString;
+  serializeJson(requestBody, requestBodyString);
+
+  int httpCode = http.POST(requestBodyString);
+  if (httpCode == 200) {
+    String payload = http.getString();
+    DynamicJsonDocument doc(512);
+    deserializeJson(doc, payload);
+    String wasteType = doc["type"].as<String>();
+    int coins = doc["coins"];
+    displayMessage("Sorting: " + wasteType + "\nCoins: " + String(coins));
+    sortWaste(wasteType);
+    http.end();
+    return true;
+  }
+  http.end();
+  return false;
+}
+
+void sortWaste(String text) {
   bucket.write(0);
   delay(500);
   flap.write(90);
   delay(500);
 
-  if (strcmp(text, "plastic") == 0) { // right quadrant in 1st half
-    flap.write(0); // right
-    delay(3000);
-    flap.write(90); // reset to home
-    delay(500);
-  } else if (strcmp(text, "metal") == 0) { // left quadrant in 1st half
-    flap.write(180); // left
-    delay(3000);
-    flap.write(90); // reset to home
-    delay(500);
-  } else if (strcmp(text, "glass") == 0) { // top right quadrant (when home position)
+  if (text == "plastic") {
+    flap.write(0);
+  } else if (text == "metal") {
+    flap.write(180);
+  } else if (text == "glass") {
     bucket.write(180);
     delay(1000);
-    flap.write(180); // left
+    flap.write(180);
     delay(3000);
-    flap.write(90); // reset to home
-    delay(500);
+    flap.write(90);
     bucket.write(0);
-    delay(1000);
-    } else if (strcmp(text, "paper") == 0) { // top left quadrant (when home position)
+    return;
+  } else if (text == "paper") {
     bucket.write(180);
     delay(1000);
-    flap.write(0); // right
+    flap.write(0);
     delay(3000);
-    flap.write(90); // reset to home
-    delay(500);
+    flap.write(90);
     bucket.write(0);
-    delay(1000);
+    return;
   }
+
+  delay(3000);
+  flap.write(90);
+  delay(500);
 }
 
-// Mock API: Terminate Session
 void terminateSession() {
-  Serial.println("Session terminated (mock)");
+  HTTPClient http;
+  String url = String(API_URL) + "/terminate";
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("x-api-key", API_KEY);
+  DynamicJsonDocument requestBody(256);
+  requestBody["id"] = machineId;
+  requestBody["sessionCode"] = sessionCode;
+  String requestBodyString;
+  serializeJson(requestBody, requestBodyString);
+  http.POST(requestBodyString);
+  http.end();
 }
 
-// Mock API: Reset Machine
 void resetMachine() {
-  Serial.println("Machine reset (mock)");
+  HTTPClient http;
+  String url = String(API_URL) + "/reset";
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("x-api-key", API_KEY);
+  DynamicJsonDocument requestBody(256);
+  requestBody["id"] = machineId;
+  String requestBodyString;
+  serializeJson(requestBody, requestBodyString);
+  http.POST(requestBodyString);
+  http.end();
   delay(2000);
   ESP.restart();
 }
-
 
 
 
